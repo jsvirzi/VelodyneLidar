@@ -35,74 +35,58 @@ inline float getAzimuth(const LidarDataBlock &block) {
     return radians;
 }
 
-size_t convertLidarDataPacketToPointCloud(const LidarDataPacket *lidar_packet, uint64_t data_packet_time, LidarData *point_cloud, size_t max_points) {
+size_t convertLidarDataPacketToPointCloud(const LidarDataPacket *dataPacket, uint64_t dataPacketTime, LidarData *pointCloud, size_t maxPoints) {
     int errors = 0;
-#if 0
     float azimuth[kNumLidarBlocksInPacket];
-        /* Find delta azimuth between blocks. In principle, one only needs to take the
-         * difference between two blocks, but we will get a better estimate by
-         * averaging over blocks in a packet.
-         * TODO: Perhaps compute variance to see if this really makes any difference.
-         */
-        float rms_delta_azimuth = 0.0f;
-        azimuth[0] = getAzimuth(lidar_packet.data_block[0]);
-        for (size_t iblock = 1; iblock < kNumLidarBlocksInPacket; iblock++) {
-            azimuth[iblock] = getAzimuth(lidar_packet.data_block[iblock]);
-            // We divide by half because each block actually contains two sets of firing data
-            float delta = 0.5 * (azimuth[iblock] - azimuth[iblock - 1]);
-            if (delta < 0.0) delta += M_PI;
-            rms_delta_azimuth += (delta * delta);
-        }
-        float delta_azimuth = sqrt(rms_delta_azimuth / (kNumLidarBlocksInPacket - 1));
-#else
-    float delta_azimuth = 0.00694f; /* empirically derived. why keep calculating the number? */
-#endif
 
-    const uint64_t top_of_hour_us = (data_packet_time / (60 * 60 * 1000) * (60 * 60 * 1000)) * 1000;
-    const uint32_t time_since_top_of_hour_us = unalignedByteStreamToUint32(lidar_packet->timestamp);
-    const uint64_t packet_begin_time_us = top_of_hour_us + time_since_top_of_hour_us;
+    /* Find delta azimuth between blocks. In principle, one only needs to take the
+     * difference between two blocks, but we will get a better estimate by
+     * averaging over blocks in a packet.
+     * TODO: Perhaps compute variance to see if this really makes any difference.
+     */
+    float rms_delta_azimuth = 0.0f;
+    azimuth[0] = getAzimuth(dataPacket->data_block[0]);
+    for (size_t iblock = 1; iblock < kNumLidarBlocksInPacket; iblock++) {
+        azimuth[iblock] = getAzimuth(dataPacket->data_block[iblock]);
+        // We divide by half because each block actually contains two sets of firing data
+        float delta = 0.5 * (azimuth[iblock] - azimuth[iblock - 1]);
+        if (delta < 0.0) delta += M_PI;
+        rms_delta_azimuth += (delta * delta);
+    }
+    float delta_azimuth = sqrt(rms_delta_azimuth / (kNumLidarBlocksInPacket - 1));
 
-    LidarData *lidar_data = point_cloud;
+    const uint64_t topOfHourUs = (dataPacketTime / (60 * 60 * 1000) * (60 * 60 * 1000)) * 1000;
+    const uint32_t timeSinceTopOfHourUs = unalignedByteStreamToUint32(dataPacket->timestamp);
+    const uint64_t packetBeginTimeUs = topOfHourUs + timeSinceTopOfHourUs;
 
-    bool first = true;
-    uint64_t first_timestamp = 0;
+    LidarData *lidar_data = pointCloud;
 
-    uint64_t datum_time_us = 0;
-    size_t n_points = 0;
+    uint64_t datumTimeUs = 0;
+    size_t nPoints = 0;
     for (size_t iblock = 0; iblock < kNumLidarBlocksInPacket; iblock++) {
-        const LidarDataBlock &lidar_data_block = lidar_packet->data_block[iblock];
+        const LidarDataBlock &lidar_data_block = dataPacket->data_block[iblock];
         float azimuth0 = getAzimuth(lidar_data_block);
         for (size_t ifiring = 0; ifiring != 2; ifiring++, azimuth0 += delta_azimuth) {
             for (size_t ichannel = 0; ichannel < kNumLidarChannels; ichannel++) {
-                datum_time_us = packet_begin_time_us + kRelativeTimeFromBeginningOfPacket[n_points];
+                datumTimeUs = packetBeginTimeUs + kRelativeTimeFromBeginningOfPacket[nPoints];
                 const LidarChannelDatum &datum = lidar_data_block.data[kNumLidarChannels * ifiring + ichannel];
-                lidar_data->time = datum_time_us; /* microseconds */
+                lidar_data->time = datumTimeUs; /* microseconds */
                 lidar_data->channel = ichannel;
                 lidar_data->reflectivity = datum.reflectivity;
                 lidar_data->phi = azimuth0 + ichannel * kCycleTimeBetweenFirings * kLidarAngularVelocity;
                 lidar_data->theta = kLaserPolarAngle[ichannel];
                 lidar_data->R = kLidarDistanceUnit * unalignedByteStreamToUint16(datum.distance);
 
-                if (first) {
-                    printf("start timestamp = %" PRIu64 "\n", datum_time_us);
-                    first_timestamp = datum_time_us;
-                    first = false;
-                }
-
                 ++lidar_data;
-                ++n_points;
-                if (n_points == max_points) {
-                    return n_points;
+                ++nPoints;
+                if (nPoints == maxPoints) {
+                    return nPoints;
                 }
             }
         }
     }
 
-    printf("final timestamp = %" PRIu64 "\n", datum_time_us);
-    printf("delta timestamp = %" PRIu64 "\n", datum_time_us - first_timestamp);
-    getchar();
-
-    return n_points;
+    return nPoints;
 }
 
 int main(int argc, char **argv) {
@@ -113,8 +97,8 @@ int main(int argc, char **argv) {
 		}
 	}
 
-	LidarDataPacket *lidar_data_packet;
-	LidarPositionPacket *lidar_position_packet;
+	LidarDataPacket *lidarDataPacket;
+	LidarPositionPacket *lidarPositionPacket;
 	void *p;
 
 	VelodynePacketReader *velodynePacketReader = new VelodynePacketReader(ifile.c_str());
@@ -123,20 +107,20 @@ int main(int argc, char **argv) {
 	LidarData *point_cloud = new LidarData [max_points];
 
 	int type = velodynePacketReader->readPacket(&p);
-    uint64_t gps_time = 0;
+    uint64_t gpsTime = 0;
 	while (type != VelodynePacketReader::LidarPacketTypes) {
 		switch (type) {
 		case VelodynePacketReader::TypeLidarDataPacket:
-			lidar_data_packet = (LidarDataPacket *)p;
-			convertLidarDataPacketToPointCloud(lidar_data_packet, gps_time, point_cloud, max_points);
+			lidarDataPacket = (LidarDataPacket *)p;
+			convertLidarDataPacketToPointCloud(lidarDataPacket, gpsTime, point_cloud, max_points);
 			break;
 		case VelodynePacketReader::TypeLidarPositionPacket:
-		    lidar_position_packet = (LidarPositionPacket *)p;
-            std::string nmea = (char *)lidar_position_packet->nmea_sentence;
+		    lidarPositionPacket = (LidarPositionPacket *)p;
+            std::string nmea = (char *)lidarPositionPacket->nmea_sentence;
             std::string gprmc = nmea.substr(0, nmea.find_first_of("\r"));
-			int status = parseGprmc(gprmc, &gps_time, 0, 0);
+			int status = parseGprmc(gprmc, &gpsTime, 0, 0);
 			if (status == 0) {
-			    printf("gps time = %" PRIu64 ". from NMEA = [%s]\n", gps_time, gprmc.c_str());
+			    printf("gps time = %" PRIu64 ". from NMEA = [%s]\n", gpsTime, gprmc.c_str());
 			} else {
 			    printf("ERROR gps time. NMEA = [%s]\n", gprmc.c_str());
 			}

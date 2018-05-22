@@ -5,4 +5,4 @@ include_directories(../include)
 include_directories(../../GpsUtils/include)
 set(CMAKE_CXX_STANDARD 11)
 
-add_executable(timestamp_lidar_samples timestamp_lidar_samples.cpp ../src/velodyne_packet_reader.cpp ../../GpsUtils/src/gps_utils.cpp)
+add_executable(timestamp_lidar_samples timestamp_lidar_samples.cpp ../src/velodyne_packet_reader.cpp ../../GpsUtils/src/gps_utils.cpp ../../GpsUtils/include/gps_utils.h)
