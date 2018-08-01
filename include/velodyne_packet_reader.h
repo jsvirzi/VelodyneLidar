@@ -27,8 +27,10 @@ class VelodynePacketReader {
 		NumberOfLidarStates
 	};
 	VelodynePacketReader(const char *file);
+	VelodynePacketReader(const char *ipAddress, int dataPort, int posPort);
 	int readPacket(void **p);
-	int fd;
+	int readPocket(void **p);
+	int fd, fdPos;
 #define NPOINTS (3600 * 16)
 	LidarData pointCloud[NPOINTS];
 	LidarPacketHeader lidarPacketHeader;
@@ -38,6 +40,12 @@ class VelodynePacketReader {
 	uint64_t analyzePacketTimestamps(const uint32_t positionPacketTimestamp, const uint32_t dataPacketTimestamp,
 		const uint64_t previousTimestamp, int &state);
 	uint64_t analyzePointCloudTimestamps(const uint32_t positionPacketTimestamp, const LidarData *pointCloud, int nPoints, int &state);
+	static constexpr size_t logBufferSize = 1024;
+	char logBuffer[logBufferSize];
+	int nfds; /* for pselect() */
+	bool debug;
+	void setup();
+	size_t nRead;
 };
 
 #endif // PCAP_READER_H

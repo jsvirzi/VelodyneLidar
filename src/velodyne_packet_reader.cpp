@@ -1,15 +1,107 @@
+#include <arpa/inet.h>
+#include <netdb.h>
+#include <netinet/in.h>
+
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <unistd.h>
 #include <string.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <stdio.h>
 
 #include "velodyne_packet_reader.h"
+
+static inline uint32_t unalignedByteStreamToUint32(const uint8_t *p) {
+	uint32_t result0 = *p++;
+	uint32_t result1 = *p++;
+	uint32_t result2 = *p++;
+	uint32_t result3 = *p;
+	uint32_t result = result0 | (result1 << 8) | (result2 << 16) | (result3 << 24);
+	return result;
+}
+
+void VelodynePacketReader::setup() {
+	debug = false;
+	nRead = 0;
+}
 
 VelodynePacketReader::VelodynePacketReader(const char *filename) {
 	PcapGlobalHeader pcapGlobalHeader;
 	fd = open(filename, O_RDONLY, S_IREAD);
 	read(fd, &pcapGlobalHeader, sizeof(PcapGlobalHeader)); /* this is overhead at beginning of file */
+	setup();
+}
+
+VelodynePacketReader::VelodynePacketReader(const char *ipAddress, int dataPort, int positionPort) {
+
+	if (dataPort == 0) {
+		constexpr int defaultDataPort = 8309;
+		dataPort = defaultDataPort;
+	}
+
+	if (positionPort == 0) {
+		constexpr int defaultPosPort = 8308;
+		positionPort = defaultPosPort;
+	}
+
+	setup();
+
+	fd = socket(PF_INET, SOCK_DGRAM, IPPROTO_UDP);
+	if (fd == -1) {
+		perror("socket");
+		return;
+	}
+
+	fdPos = socket(PF_INET, SOCK_DGRAM, IPPROTO_UDP);
+	if (fdPos == -1) {
+		perror("socket");
+		return;
+	}
+
+	nfds = fd;
+	if (nfds < fdPos) {
+		nfds = fdPos;
+	}
+	nfds = nfds + 1; /* pselect() requirements */
+
+	int optval;
+	socklen_t optlen;
+
+	optlen = sizeof(optval);
+	setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &optval, optlen);
+
+	optlen = sizeof(optval);
+	setsockopt(fdPos, SOL_SOCKET, SO_REUSEADDR, &optval, optlen);
+
+	struct sockaddr_in data_socket_address;
+	struct sockaddr_in position_socket_address;
+	data_socket_address.sin_family = AF_INET;         // host byte order
+	position_socket_address.sin_family = AF_INET;     // host byte order
+	data_socket_address.sin_port = htons(dataPort);  // port in network byte order
+	position_socket_address.sin_port = htons(positionPort);
+	if ((ipAddress == 0) || (strlen(ipAddress) == 0)) {
+		data_socket_address.sin_addr.s_addr = INADDR_ANY;      // Automatically fill in my IP.
+		position_socket_address.sin_addr.s_addr = INADDR_ANY;  // Automatically fill in my IP.
+	} else {
+		data_socket_address.sin_addr.s_addr = inet_addr(ipAddress);      // Specify IP address.
+		position_socket_address.sin_addr.s_addr = inet_addr(ipAddress);  // Specify IP address.
+	}
+
+	auto stat = bind(fd, reinterpret_cast<struct sockaddr *>(&data_socket_address), sizeof(struct sockaddr));
+
+	if (stat == -1) {
+		perror("bind");
+		return;
+	}
+
+	stat = bind(fdPos, reinterpret_cast<struct sockaddr *>(&position_socket_address), sizeof(struct sockaddr));
+
+	if (stat == -1) {
+		perror("bind");
+		return;
+	}
 }
 
 int VelodynePacketReader::readPacket(void **p) {
@@ -34,13 +126,76 @@ int VelodynePacketReader::readPacket(void **p) {
 	return type;
 }
 
-inline uint32_t unalignedByteStreamToUint32(const uint8_t *p) {
-	uint32_t result0 = *p++;
-	uint32_t result1 = *p++;
-	uint32_t result2 = *p++;
-	uint32_t result3 = *p;
-	uint32_t result = result0 | (result1 << 8) | (result2 << 16) | (result3 << 24);
-	return result;
+int VelodynePacketReader::readPocket(void **p) {
+	fd_set rfds;
+	struct timespec ts{ /* 1 second timeout to allow for interrupts to be processed */
+		tv_sec : 1, tv_nsec : 0
+	};
+	FD_ZERO(&rfds);
+	FD_SET(fd, &rfds);
+	FD_SET(fdPos, &rfds);
+
+	if (debug) {
+		int nBytes = snprintf(logBuffer, logBufferSize, "entering pselect()");
+		printf("%s\n", logBuffer);
+	}
+
+	const int fdsAvailable = pselect(nfds, &rfds, nullptr, nullptr, &ts, nullptr);
+	if (fdsAvailable < 0) {
+		perror("LIDAR pselect failed.");
+		return -1;
+	} else if (fdsAvailable == 0) {
+		if (debug) {
+			int nBytes = snprintf(logBuffer, logBufferSize, "lidar packets timed out!!!");
+			printf("%s\n", logBuffer);
+		}
+	}
+
+	if (debug) {
+		int nBytes = snprintf(logBuffer, logBufferSize, "exitting pselect()");
+		printf("%s\n", logBuffer);
+	}
+
+	int type = LidarPacketTypes;
+
+	if (FD_ISSET(fd, &rfds)) { /* read lidar data packets */
+
+		struct sockaddr_in sender_address;
+		socklen_t sender_address_len = sizeof(sender_address);
+		const ssize_t nBytesRead = recvfrom(fd,
+			&lidarDataPacket, sizeof(LidarDataPacket), 0, (struct sockaddr *) &sender_address, &sender_address_len);
+		nRead += nBytesRead;
+
+		if (debug) {
+			int nBytes = snprintf(logBuffer, logBufferSize,
+				"received %ld bytes from port %d", nBytesRead, sender_address.sin_port);
+			printf("%s\n", logBuffer);
+		}
+
+		*p = (nBytesRead == sizeof(LidarDataPacket)) ? (void *) &lidarDataPacket : 0;
+		type = TypeLidarDataPacket;
+
+//			convertLidarPacketToLidarSamples(packet, &lidar->event_storage_ring, lidar->time_from_data,
+//				lidar->next_event_time, lidar->delta_event_time, status);
+
+	} else if (FD_ISSET(fdPos, &rfds)) { /* read lidar position packets */
+
+		struct sockaddr_in sender_address;
+		socklen_t sender_address_len = sizeof(sender_address);
+		const ssize_t nBytesRead = recvfrom(fdPos,
+			&lidarPositionPacket, sizeof(LidarPositionPacket), 0, (struct sockaddr *) &sender_address, &sender_address_len);
+		nRead += nBytesRead;
+
+		if (debug) {
+			int nBytes = snprintf(logBuffer, logBufferSize,
+				"received %ld bytes from port %d", nBytesRead, sender_address.sin_port);
+			printf("%s\n", logBuffer);
+		}
+
+		*p = (nBytesRead == sizeof(LidarPositionPacket)) ? (void *) &lidarPositionPacket : 0;
+		type = TypeLidarPositionPacket;
+	}
+	return type;
 }
 
 uint64_t VelodynePacketReader::analyzePacketTimestamps(const uint32_t positionPacketTimestamp, const uint32_t dataPacketTimestamp,

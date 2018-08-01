@@ -104,11 +104,15 @@ size_t convertLidarDataPacketToPointCloud(const LidarDataPacket *dataPacket, uin
 }
 
 int main(int argc, char **argv) {
-	std::string ifile = "/home/jsvirzi/data/ublox-novatel-comparison/gps-testing/raw/lidar.pcap";
-	ifile = "/home/jsvirzi/data/velodyne-testing/firmware3038-rig1/lidar.pcap";
+	std::string ifile;
+	// ifile = "/home/jsvirzi/data/ublox-novatel-comparison/gps-testing/raw/lidar.pcap";
+	// ifile = "/home/jsvirzi/data/velodyne-testing/firmware3038-rig1/lidar.pcap";
+	std::string ipAddress;
+	// ipAddress = "192.168.2.77";
 	for (int i = 1; i < argc; ++i) {
 		if (strcmp(argv[i], "-i") == 0) {
 			ifile = argv[++i];
+		} else if (strcmp(argv[i], "-eth") == 0) {
 		}
 	}
 
@@ -116,7 +120,8 @@ int main(int argc, char **argv) {
 	LidarPositionPacket *lidarPositionPacket;
 	void *p;
 
-	VelodynePacketReader *velodynePacketReader = new VelodynePacketReader(ifile.c_str());
+	// VelodynePacketReader *velodynePacketReader = new VelodynePacketReader(ifile.c_str());
+	VelodynePacketReader *velodynePacketReader = new VelodynePacketReader(ipAddress.c_str(), 0, 0);
 
 	const size_t kMaxPoints = 16384;
 	LidarData *pointCloud = new LidarData [kMaxPoints];
@@ -124,34 +129,67 @@ int main(int argc, char **argv) {
 
 	memset(triggerPoint, 0, sizeof(LidarData));
 
-	int type = velodynePacketReader->readPacket(&p);
+	bool update = false;
+
+//	int type = velodynePacketReader->readPacket(&p);
+	int type = velodynePacketReader->readPocket(&p);
     uint64_t gpsTimeMs = 0; // , nextEventTimeUs = 0;
+    uint32_t timestamp, previousSeconds = -1;
 	while (type != VelodynePacketReader::LidarPacketTypes) {
-		switch (type) {
+
+        switch (type) {
+
 		case VelodynePacketReader::TypeLidarDataPacket:
-		    if (gpsTimeMs == 0) { /* wait until we have a time reference */
-		        break;
-		    } else {
-		        if (triggerPoint->time == 0) {
-                    triggerPoint->time = (gpsTimeMs + 1000) * 1000;
-		        }
-		    }
-			lidarDataPacket = (LidarDataPacket *)p;
-			convertLidarDataPacketToPointCloud(lidarDataPacket, gpsTimeMs, pointCloud, kMaxPoints, triggerPoint);
+
+            lidarDataPacket = (LidarDataPacket *)p;
+
+            uint32_t remaining, minutes, seconds, usecs;
+            timestamp = unalignedByteStreamToUint32(lidarDataPacket->timestamp);
+
+            remaining = timestamp;
+            usecs = remaining % 1000000;
+            remaining = remaining / 1000000;
+            seconds = remaining % 60;
+            remaining = remaining / 60;
+            minutes = remaining % 60;
+
+            if (seconds != previousSeconds) {
+                printf("timestamp = %8.8x = %2.2d:%2.2d.%6.6d\n", timestamp, minutes, seconds, usecs);
+                if (update == false) {
+                    update = true;
+                }
+            }
+            previousSeconds = seconds;
+
+			//convertLidarDataPacketToPointCloud(lidarDataPacket, gpsTimeMs, pointCloud, kMaxPoints, triggerPoint);
+
+            break;
+
+        case VelodynePacketReader::TypeLidarPositionPacket:
+
+            lidarPositionPacket = (LidarPositionPacket *)p;
+            if (update == true) {
+                std::string nmea = (char *)lidarPositionPacket->nmea_sentence;
+                std::string gprmc = nmea.substr(0, nmea.find_first_of("\r"));
+                int status = parseGprmc(gprmc, &gpsTimeMs, 0, 0);
+                if (status == 0) {
+                    printf("gps time = %" PRIu64 ". from NMEA = [%s]\n", gpsTimeMs, gprmc.c_str());
+                } else {
+                    printf("ERROR gps time. NMEA = [%s]\n", gprmc.c_str());
+                }
+                update = false;
+            }
+
 			break;
-		case VelodynePacketReader::TypeLidarPositionPacket:
-		    lidarPositionPacket = (LidarPositionPacket *)p;
-            std::string nmea = (char *)lidarPositionPacket->nmea_sentence;
-            std::string gprmc = nmea.substr(0, nmea.find_first_of("\r"));
-			int status = parseGprmc(gprmc, &gpsTimeMs, 0, 0);
-			if (status == 0) {
-			    printf("gps time = %" PRIu64 ". from NMEA = [%s]\n", gpsTimeMs, gprmc.c_str());
-			} else {
-			    printf("ERROR gps time. NMEA = [%s]\n", gprmc.c_str());
-			}
-			break;
-		}
-		type = velodynePacketReader->readPacket(&p);
-	}
+
+        default:
+
+            break;
+
+        }
+//        type = velodynePacketReader->readPacket(&p);
+        type = velodynePacketReader->readPocket(&p);
+
+    }
 }
 
